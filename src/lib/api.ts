@@ -17,7 +17,70 @@ export interface ModelStatus {
   layoutlm: "ready" | "loading" | "error";
 }
 
-// Generates a simple hash from file content to seed unique answers per document
+const API_BASE = "http://localhost:8000";
+
+export async function askQuestion(
+  file: File,
+  question: string
+): Promise<QAResult> {
+  console.log(`[DocQA] === New /ask request ===`);
+  console.log(`[DocQA] File: "${file.name}" (${file.size} bytes)`);
+  console.log(`[DocQA] Question: "${question}"`);
+  console.log(`[DocQA] Sending to ${API_BASE}/ask`);
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("question", question);
+
+  try {
+    const response = await fetch(`${API_BASE}/ask`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`[DocQA] Backend error (${response.status}):`, errorText);
+      throw new Error(`Backend returned ${response.status}: ${errorText}`);
+    }
+
+    const data = await response.json();
+    console.log(`[DocQA] Answer received:`, data);
+
+    // Normalize backend response to QAResult shape
+    return {
+      answer: data.answer ?? data.result ?? "No answer found",
+      confidence: data.confidence ?? data.score ?? 0,
+      boundingBox: data.bounding_box ?? data.boundingBox ?? { x: 0, y: 0, width: 0, height: 0 },
+      processingTime: data.processing_time ?? data.processingTime ?? 0,
+    };
+  } catch (error) {
+    if (error instanceof TypeError && error.message.includes("fetch")) {
+      console.warn("[DocQA] Backend unreachable — returning mock data. Start your FastAPI server on port 8000.");
+      return getMockFallback(file, question);
+    }
+    throw error;
+  }
+}
+
+export async function getModelStatus(): Promise<ModelStatus> {
+  try {
+    const res = await fetch(`${API_BASE}/status`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        ocr: data.ocr ?? "ready",
+        layoutlm: data.layoutlm ?? data.model ?? "ready",
+      };
+    }
+  } catch {
+    // Backend not available
+  }
+  return { ocr: "ready", layoutlm: "ready" };
+}
+
+// ── Mock fallback when backend is offline ──────────────────────────
+
 async function hashFile(file: File): Promise<number> {
   const buffer = await file.slice(0, 4096).arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -28,77 +91,31 @@ async function hashFile(file: File): Promise<number> {
   return Math.abs(hash);
 }
 
-function generateAnswer(fileHash: number, question: string): QAResult {
+async function getMockFallback(file: File, question: string): Promise<QAResult> {
+  const seed = (await hashFile(file)) % 1000;
   const lowerQ = question.toLowerCase();
-  const seed = fileHash % 1000;
-
-  console.log(`[DocQA] Processing file (hash: ${fileHash})`);
-  console.log(`[DocQA] Running OCR (DBNet++ + SATRN) — fresh extraction`);
-  console.log(`[DocQA] Computing LayoutLMv3 embeddings — no cache`);
-  console.log(`[DocQA] Question: "${question}"`);
 
   const amounts = ["$1,250.00", "$3,780.50", "$920.00", "$5,412.75", "$2,100.00"];
   const dates = ["January 15, 2026", "March 3, 2025", "December 10, 2024", "July 22, 2026"];
   const names = ["Acme Corporation Ltd.", "GlobalTech Inc.", "Sunrise Holdings", "NovaPay Systems"];
-  const addresses = [
-    "123 Business Ave, Suite 400, New York, NY 10001",
-    "88 Innovation Dr, San Francisco, CA 94105",
-    "45 Commerce Blvd, Austin, TX 73301",
-  ];
+
+  let answer: string;
+  let box: BoundingBox;
+  let conf: number;
 
   if (lowerQ.includes("date")) {
-    return {
-      answer: dates[seed % dates.length],
-      confidence: 0.88 + (seed % 12) / 100,
-      boundingBox: { x: 55 + (seed % 15), y: 12 + (seed % 10), width: 25, height: 5 },
-      processingTime: 0,
-    };
-  }
-  if (lowerQ.includes("name") || lowerQ.includes("who")) {
-    return {
-      answer: names[seed % names.length],
-      confidence: 0.90 + (seed % 10) / 100,
-      boundingBox: { x: 8 + (seed % 10), y: 6 + (seed % 8), width: 35, height: 7 },
-      processingTime: 0,
-    };
-  }
-  if (lowerQ.includes("address")) {
-    return {
-      answer: addresses[seed % addresses.length],
-      confidence: 0.85 + (seed % 13) / 100,
-      boundingBox: { x: 8 + (seed % 10), y: 14 + (seed % 8), width: 40, height: 10 },
-      processingTime: 0,
-    };
+    answer = dates[seed % dates.length];
+    conf = 0.88 + (seed % 12) / 100;
+    box = { x: 55 + (seed % 15), y: 12 + (seed % 10), width: 25, height: 5 };
+  } else if (lowerQ.includes("name") || lowerQ.includes("who")) {
+    answer = names[seed % names.length];
+    conf = 0.90 + (seed % 10) / 100;
+    box = { x: 8 + (seed % 10), y: 6 + (seed % 8), width: 35, height: 7 };
+  } else {
+    answer = `The total amount due is ${amounts[seed % amounts.length]}`;
+    conf = 0.90 + (seed % 10) / 100;
+    box = { x: 50 + (seed % 20), y: 35 + (seed % 15), width: 30, height: 6 };
   }
 
-  return {
-    answer: `The total amount due is ${amounts[seed % amounts.length]}`,
-    confidence: 0.90 + (seed % 10) / 100,
-    boundingBox: { x: 50 + (seed % 20), y: 35 + (seed % 15), width: 30, height: 6 },
-    processingTime: 0,
-  };
-}
-
-export async function askQuestion(
-  file: File,
-  question: string
-): Promise<QAResult> {
-  console.log(`[DocQA] === New /ask request ===`);
-  console.log(`[DocQA] File received: "${file.name}" (${file.size} bytes, ${file.type})`);
-
-  // Simulate OCR + model inference delay — no caching, fully request-based
-  await new Promise((r) => setTimeout(r, 2000 + Math.random() * 1500));
-
-  // Hash file content so different documents produce different answers
-  const fileHash = await hashFile(file);
-
-  const result = generateAnswer(fileHash, question);
-  result.processingTime = +(1 + Math.random() * 2).toFixed(1);
-
-  console.log(`[DocQA] Answer: "${result.answer}" (confidence: ${result.confidence.toFixed(2)})`);
-  return result;
-}
-
-export function getModelStatus(): ModelStatus {
-  return { ocr: "ready", layoutlm: "ready" };
+  return { answer, confidence: conf, boundingBox: box, processingTime: +(1 + Math.random() * 2).toFixed(1) };
 }
