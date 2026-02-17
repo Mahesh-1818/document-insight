@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { getModelStatus, type ModelStatus } from "@/lib/api";
 
 const statusColors: Record<ModelStatus["ocr"], string> = {
@@ -7,7 +8,11 @@ const statusColors: Record<ModelStatus["ocr"], string> = {
 };
 
 export function ModelStatusBar() {
-  const status = getModelStatus();
+  const [status, setStatus] = useState<ModelStatus>({ ocr: "loading", layoutlm: "loading" });
+
+  useEffect(() => {
+    getModelStatus().then(setStatus);
+  }, []);
 
   return (
     <div className="flex items-center gap-4">
